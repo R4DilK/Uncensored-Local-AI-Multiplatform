@@ -6,8 +6,36 @@ import 'package:get/get.dart';
 import '../theme/app_colors.dart';
 import '../models/message_model.dart';
 import '../services/llm_service.dart';
+import '../services/tts_service.dart';
 
 class ChatBubble extends StatelessWidget {
+  Widget _copyButton(BuildContext context) {
+    return InkWell(
+      onTap: () {
+        Clipboard.setData(ClipboardData(text: message.content));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Copiado'),
+            duration: Duration(seconds: 1),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      },
+      borderRadius: BorderRadius.circular(4),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.copy_rounded, size: 14, color: context.textD),
+            const SizedBox(width: 4),
+            Text('Copiar', style: TextStyle(fontSize: 12, color: context.textD)),
+          ],
+        ),
+      ),
+    );
+  }
+
   final MessageModel message;
   /// If true, this is the last AI message and we show speed info
   final bool showSpeed;
@@ -54,16 +82,25 @@ class ChatBubble extends StatelessWidget {
 
   Widget _buildContent(BuildContext context, bool isUser) {
     if (isUser) {
-      return Padding(
-        padding: const EdgeInsets.only(top: 3),
-        child: Text(
-          message.content,
-          style: TextStyle(
-            fontSize: 15,
-            color: context.text,
-            height: 1.6,
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 3),
+            child: SelectableText(
+              message.content,
+              style: TextStyle(
+                fontSize: 15,
+                color: context.text,
+                height: 1.6,
+              ),
+            ),
           ),
-        ),
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: _copyButton(context),
+          ),
+        ],
       );
     }
 
@@ -144,6 +181,38 @@ class ChatBubble extends StatelessWidget {
                     ),
                   ),
                 ),
+
+                const SizedBox(width: 12),
+                // Read aloud button
+                Obx(() {
+                  final id = identityHashCode(message).toString();
+                  final speaking = TtsService.instance.speakingId.value == id;
+                  return InkWell(
+                    onTap: () => TtsService.instance.toggle(id, message.content),
+                    borderRadius: BorderRadius.circular(4),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            speaking ? Icons.stop_rounded : Icons.volume_up_rounded,
+                            size: 14,
+                            color: speaking ? AppColors.accent : context.textD,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            speaking ? 'Parar' : 'Escuchar',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: speaking ? AppColors.accent : context.textD,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }),
 
                 // Speed indicator (on the last AI message)
                 if (showSpeed) ...[
