@@ -10,6 +10,7 @@ import '../services/local_api_server_service.dart';
 import '../services/model_manager.dart';
 import '../services/background_optimizer_service.dart';
 import '../services/chat_storage_service.dart';
+import '../widgets/ollama_card.dart';
 
 class SettingsScreen extends StatelessWidget {
   /// When true, no Scaffold — just the body content for embedding in tabs.
@@ -85,6 +86,18 @@ class _SettingsBody extends StatelessWidget {
           child: ListView(
             padding: const EdgeInsets.all(20),
             children: [
+              // ── Ollama ────────────────────────────────────
+              _sectionHeader(context, 'Ollama (modelos en la nube)'),
+              const SizedBox(height: 12),
+              const OllamaCard(),
+              const SizedBox(height: 28),
+
+              // ── Voice ─────────────────────────────────────
+              _sectionHeader(context, 'Voz'),
+              const SizedBox(height: 12),
+              const VoiceCard(),
+              const SizedBox(height: 28),
+
               // ── Appearance ────────────────────────────────
               _sectionHeader(context, 'Appearance'),
               const SizedBox(height: 12),
