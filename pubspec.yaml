@@ -35,6 +35,9 @@ dependencies:
   flutter_animate: ^4.5.0          # Micro-animations
   cupertino_icons: ^1.0.8
 
+  # ── Voice ───────────────────────────────────────────────────────
+  flutter_tts: ^4.2.3                # Read answers aloud
+
   # ── Background / Wake Lock ─────────────────────────────────────
   wakelock_plus: ^1.2.10             # Keep screen on during downloads
   flutter_foreground_task: ^9.2.2    # Foreground service for downloads/inference
