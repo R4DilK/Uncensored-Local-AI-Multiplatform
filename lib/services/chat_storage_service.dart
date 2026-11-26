@@ -107,4 +107,33 @@ class ChatStorageService extends GetxService {
       _settingsBox.get('backend_type', defaultValue: 'cpu') as String;
 
   set backendType(String value) => _settingsBox.put('backend_type', value);
+
+  // ── Ollama ─────────────────────────────────────────────────
+
+  String get ollamaBaseUrl =>
+      _settingsBox.get('ollama_base_url', defaultValue: 'http://127.0.0.1:11434')
+          as String;
+
+  set ollamaBaseUrl(String value) => _settingsBox.put('ollama_base_url', value);
+
+  String get ollamaModel =>
+      _settingsBox.get('ollama_model', defaultValue: 'deepseek-v4.1-flash:cloud')
+          as String;
+
+  set ollamaModel(String value) => _settingsBox.put('ollama_model', value);
+
+  /// Reconnect to Ollama automatically when the app starts.
+  bool get ollamaAutoConnect =>
+      _settingsBox.get('ollama_auto_connect', defaultValue: false) as bool;
+
+  set ollamaAutoConnect(bool value) =>
+      _settingsBox.put('ollama_auto_connect', value);
+
+  // ── Voice ──────────────────────────────────────────────────
+
+  /// Read every new answer aloud automatically.
+  bool get autoSpeak =>
+      _settingsBox.get('auto_speak', defaultValue: false) as bool;
+
+  set autoSpeak(bool value) => _settingsBox.put('auto_speak', value);
 }
