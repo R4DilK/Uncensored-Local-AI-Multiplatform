@@ -38,6 +38,17 @@ class ModelController extends GetxController {
       selectedModelFilename.value = lastId;
     }
 
+    // Reconnect to Ollama on start-up if the user asked for it.
+    if (_storage.ollamaAutoConnect) {
+      final model = _storage.ollamaModel;
+      () async {
+        try {
+          await _llm.connectOllama(baseUrl: _storage.ollamaBaseUrl, model: model);
+          selectedModelFilename.value = 'Ollama · $model';
+        } catch (_) {}
+      }();
+    }
+
     // Listen to LLM service loading state for progress
     ever(_llm.loadingProgress, (double progress) {
       loadingProgress.value = progress;
