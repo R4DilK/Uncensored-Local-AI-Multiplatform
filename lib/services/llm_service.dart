@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
+import 'package:http/http.dart' as http;
 import 'package:llamadart/llamadart.dart';
 import 'package:path/path.dart' as p;
 
@@ -28,6 +30,17 @@ class LlmService extends GetxService {
   bool _loadingCancelled = false;
 
   StreamSubscription? _generateSub;
+
+  // ── Ollama (cloud/local server) mode ───────────────────────
+  /// When true, generation is sent to an Ollama server instead of the
+  /// local llama.cpp engine (e.g. `deepseek-v4.1-flash:cloud`).
+  final ollamaActive = false.obs;
+  final ollamaModel = ''.obs;
+  String _ollamaBaseUrl = 'http://127.0.0.1:11434';
+  http.Client? _ollamaClient;
+  bool _ollamaStopRequested = false;
+
+  String get ollamaBaseUrl => _ollamaBaseUrl;
 
   String get loadedModelFilename {
     final path = loadedModelPath.value;
@@ -150,7 +163,8 @@ class LlmService extends GetxService {
       // Use smaller context on Android to prevent OOM kills.
       // Desktop can handle 2048, but Android devices with limited RAM
       // need 1024 to avoid the Low Memory Killer (LMK).
-      final contextSize = Platform.isAndroid ? 1024 : 2048;
+      // Desktop GPUs have plenty of room: 8K tokens of conversation memory.
+      final contextSize = Platform.isAndroid ? 1024 : 8192;
 
       // Map the string backend to GpuBackend enum
       final storage = Get.find<ChatStorageService>();
@@ -169,16 +183,24 @@ class LlmService extends GetxService {
       // Read gpu layers
       final userGpuLayers = storage.gpuLayers;
 
-      // Optimize threads: 4 for both generation and batch processing to keep memory stable.
+      // Threads: mobile keeps 4 for memory stability; desktop uses roughly
+      // one thread per physical core (logical cores / 2), between 4 and 16.
+      final cores = Platform.numberOfProcessors;
+      final int threads;
+      if (Platform.isAndroid || Platform.isIOS) {
+        threads = cores > 4 ? 4 : 0;
+      } else {
+        threads = (cores ~/ 2).clamp(4, 16);
+      }
       final params = ModelParams(
         contextSize: contextSize,
-        gpuLayers: userGpuLayers, 
+        gpuLayers: userGpuLayers,
         preferredBackend: parsedBackend,
-        numberOfThreads: Platform.numberOfProcessors > 4 ? 4 : 0, 
-        numberOfThreadsBatch: Platform.numberOfProcessors > 4 ? 4 : 0,
+        numberOfThreads: threads,
+        numberOfThreadsBatch: threads,
       );
 
-      log?.info('Backend=$parsedBackend, GPU layers=$userGpuLayers, ctx=$contextSize, threads=${Platform.numberOfProcessors > 4 ? 4 : 0}', source: 'LLM');
+      log?.info('Backend=$parsedBackend, GPU layers=$userGpuLayers, ctx=$contextSize, threads=$threads', source: 'LLM');
 
       await _engine!.loadModel(path, modelParams: params);
       progressTimer.cancel();
@@ -262,6 +284,67 @@ class LlmService extends GetxService {
   /// [systemPrompt] is prepended as a system message.
   /// Returns a Stream of String tokens.
   Stream<String> generate({
+    required List<Map<String, String>> messages,
+    String? systemPrompt,
+    double temperature = 0.7,
+  }) async* {
+    if (ollamaActive.value) {
+      yield* _generateOllama(
+        messages: messages,
+        systemPrompt: systemPrompt,
+        temperature: temperature,
+      );
+      return;
+    }
+
+    // Prefer the model's own chat template (better answers for Qwen, Gemma,
+    // Llama...). Falls back to the classic prompt if the template fails
+    // before producing any text.
+    if (_engine != null && isLoaded.value && !isGenerating.value) {
+      var produced = false;
+      try {
+        final chatMessages = <LlamaChatMessage>[
+          if (systemPrompt != null && systemPrompt.isNotEmpty)
+            LlamaChatMessage.fromText(
+                role: LlamaChatRole.system, text: systemPrompt),
+          for (final m in messages)
+            LlamaChatMessage.fromText(
+              role: m['role'] == 'assistant'
+                  ? LlamaChatRole.assistant
+                  : m['role'] == 'system'
+                      ? LlamaChatRole.system
+                      : LlamaChatRole.user,
+              text: m['content'] ?? '',
+            ),
+        ];
+        final params = const GenerationParams(penalty: 1.1, topP: 0.95, minP: 0.05)
+            .copyWith(temp: temperature);
+        await for (final token in generateChatCompletion(
+          messages: chatMessages,
+          params: params,
+        )) {
+          produced = true;
+          yield token;
+        }
+        return;
+      } catch (e) {
+        if (produced) rethrow;
+        try {
+          Get.find<LogService>().info(
+              'Chat template failed, using classic prompt: $e', source: 'LLM');
+        } catch (_) {}
+      }
+    }
+
+    yield* _generateClassic(
+      messages: messages,
+      systemPrompt: systemPrompt,
+      temperature: temperature,
+    );
+  }
+
+  /// Classic generation with a generic prompt format (original behaviour).
+  Stream<String> _generateClassic({
     required List<Map<String, String>> messages,
     String? systemPrompt,
     double temperature = 0.7,
@@ -397,6 +480,11 @@ class LlmService extends GetxService {
 
   /// Stop ongoing generation.
   Future<void> stopGeneration() async {
+    if (_ollamaClient != null) {
+      _ollamaStopRequested = true;
+      _ollamaClient!.close();
+      _ollamaClient = null;
+    }
     _generateSub?.cancel();
     _generateSub = null;
     _engine?.cancelGeneration();
@@ -415,6 +503,8 @@ class LlmService extends GetxService {
     }
     // Also destroy the backend — it can't be reused after engine disposal
     _backend = null;
+    ollamaActive.value = false;
+    ollamaModel.value = '';
     isLoaded.value = false;
     loadedModelPath.value = '';
     tokensPerSecond.value = 0.0;
@@ -429,6 +519,152 @@ class LlmService extends GetxService {
       final wakelockService = Get.find<WakelockService>();
       await wakelockService.disable();
     } catch (_) {}
+  }
+
+  // ── Ollama ─────────────────────────────────────────────────
+
+  static String _normalizeBaseUrl(String url) {
+    var u = url.trim();
+    if (u.isEmpty) u = 'http://127.0.0.1:11434';
+    if (!u.startsWith('http://') && !u.startsWith('https://')) u = 'http://$u';
+    while (u.endsWith('/')) {
+      u = u.substring(0, u.length - 1);
+    }
+    if (u.endsWith('/v1')) u = u.substring(0, u.length - 3);
+    return u;
+  }
+
+  /// Names of the models the Ollama server has (including `:cloud` ones).
+  Future<List<String>> listOllamaModels(String baseUrl) async {
+    final base = _normalizeBaseUrl(baseUrl);
+    final resp = await http
+        .get(Uri.parse('$base/api/tags'))
+        .timeout(const Duration(seconds: 6));
+    if (resp.statusCode != 200) {
+      throw Exception('Ollama respondió ${resp.statusCode}');
+    }
+    final data = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+    final models = (data['models'] as List? ?? const [])
+        .map((m) => (m as Map)['name']?.toString() ?? '')
+        .where((n) => n.isNotEmpty)
+        .toList();
+    return models;
+  }
+
+  /// Switch generation to an Ollama model. Unloads any local GGUF model.
+  Future<void> connectOllama({required String baseUrl, required String model}) async {
+    final base = _normalizeBaseUrl(baseUrl);
+    final name = model.trim();
+    if (name.isEmpty) throw Exception('Escribe el nombre del modelo de Ollama.');
+    // Check the server is reachable before switching.
+    try {
+      await http.get(Uri.parse('$base/api/version')).timeout(const Duration(seconds: 5));
+    } catch (_) {
+      throw Exception(
+          'No se puede conectar con Ollama en $base. ¿Está Ollama abierto?');
+    }
+    if (_engine != null || isLoaded.value) {
+      await _fullTeardown();
+    }
+    _ollamaBaseUrl = base;
+    ollamaModel.value = name;
+    ollamaActive.value = true;
+    loadedModelPath.value = 'ollama:$name';
+    isLoaded.value = true;
+    try {
+      Get.find<LogService>().info('Connected to Ollama $base model=$name', source: 'LLM');
+    } catch (_) {}
+  }
+
+  Future<void> disconnectOllama() async {
+    await stopGeneration();
+    ollamaActive.value = false;
+    ollamaModel.value = '';
+    if (_engine == null) {
+      isLoaded.value = false;
+      loadedModelPath.value = '';
+    }
+  }
+
+  Stream<String> _generateOllama({
+    required List<Map<String, String>> messages,
+    String? systemPrompt,
+    double temperature = 0.7,
+  }) async* {
+    if (isGenerating.value) {
+      throw StateError('Another generation is already in progress.');
+    }
+    isGenerating.value = true;
+    tokensPerSecond.value = 0.0;
+    _ollamaStopRequested = false;
+    final stopwatch = Stopwatch()..start();
+    int tokenCount = 0;
+    final client = http.Client();
+    _ollamaClient = client;
+
+    try {
+      final body = jsonEncode({
+        'model': ollamaModel.value,
+        'stream': true,
+        'temperature': temperature,
+        'messages': [
+          if (systemPrompt != null && systemPrompt.isNotEmpty)
+            {'role': 'system', 'content': systemPrompt},
+          for (final m in messages)
+            {'role': m['role'] ?? 'user', 'content': m['content'] ?? ''},
+        ],
+      });
+      final req = http.Request('POST', Uri.parse('$_ollamaBaseUrl/v1/chat/completions'))
+        ..headers['Content-Type'] = 'application/json'
+        ..body = body;
+      final resp = await client.send(req);
+      if (resp.statusCode != 200) {
+        final err = await resp.stream.bytesToString();
+        if (resp.statusCode == 402) {
+          throw Exception(
+              'Ollama pide créditos o suscripción para este modelo (402). Revisa tu saldo en ollama.com.');
+        }
+        if (resp.statusCode == 404) {
+          throw Exception(
+              'Ollama no encuentra el modelo "${ollamaModel.value}". Ejecuta: ollama pull ${ollamaModel.value}');
+        }
+        throw Exception('Ollama error ${resp.statusCode}: $err');
+      }
+
+      await for (final line in resp.stream
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())) {
+        if (!line.startsWith('data:')) continue;
+        final data = line.substring(5).trim();
+        if (data == '[DONE]') break;
+        try {
+          final j = jsonDecode(data) as Map<String, dynamic>;
+          final choices = j['choices'] as List?;
+          if (choices == null || choices.isEmpty) continue;
+          final delta = (choices.first as Map)['delta'] as Map?;
+          final content = delta?['content'];
+          if (content is String && content.isNotEmpty) {
+            tokenCount++;
+            if (stopwatch.elapsedMilliseconds > 0) {
+              tokensPerSecond.value =
+                  tokenCount / (stopwatch.elapsedMilliseconds / 1000);
+            }
+            yield content;
+          }
+        } catch (_) {
+          // Ignore malformed keep-alive lines.
+        }
+      }
+    } catch (e) {
+      if (!_ollamaStopRequested) rethrow;
+    } finally {
+      stopwatch.stop();
+      if (identical(_ollamaClient, client)) _ollamaClient = null;
+      client.close();
+      lastGenerationTokens.value = tokenCount;
+      lastGenerationSpeed.value = tokensPerSecond.value;
+      isGenerating.value = false;
+    }
   }
 
   /// Build a single prompt string from chat messages.
