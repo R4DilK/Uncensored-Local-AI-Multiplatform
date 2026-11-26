@@ -1,0 +1,31 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - run: flutter config --enable-windows-desktop
+      - run: flutter pub get
+      - run: flutter build windows --release
+
+      - name: Juntar exe y codigo en una carpeta
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force salida | Out-Null
+          Copy-Item -Recurse build\windows\x64\runner\Release salida\Programa-Windows
+          git archive --format=zip -o salida\Codigo-fuente.zip HEAD
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Uncensored-Local-AI-Windows
+          path: salida
