@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 
 import '../theme/app_colors.dart';
@@ -1081,6 +1082,24 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
+            // Paste from clipboard
+            Padding(
+              padding: const EdgeInsets.only(right: 4, bottom: 6),
+              child: Tooltip(
+                message: 'Pegar',
+                child: InkWell(
+                  onTap: _pasteFromClipboard,
+                  borderRadius: BorderRadius.circular(20),
+                  child: SizedBox(
+                    width: 36,
+                    height: 36,
+                    child: Icon(Icons.content_paste_rounded,
+                        size: 18, color: context.textM),
+                  ),
+                ),
+              ),
+            ),
+
             // Send / Stop
             Padding(
               padding: const EdgeInsets.only(right: 8, bottom: 6),
@@ -1103,6 +1122,22 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
       ),
+    );
+  }
+
+  /// Insert the clipboard text at the cursor of the message box.
+  Future<void> _pasteFromClipboard() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text;
+    if (text == null || text.isEmpty) return;
+    final value = _msgController.value;
+    final sel = value.selection;
+    final start = sel.isValid ? sel.start : value.text.length;
+    final end = sel.isValid ? sel.end : value.text.length;
+    final newText = value.text.replaceRange(start, end, text);
+    _msgController.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: start + text.length),
     );
   }
 
