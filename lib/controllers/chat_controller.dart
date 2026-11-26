@@ -5,6 +5,7 @@ import '../models/chat_model.dart';
 import '../models/message_model.dart';
 import '../services/llm_service.dart';
 import '../services/chat_storage_service.dart';
+import '../services/tts_service.dart';
 
 class ChatController extends GetxController {
   final LlmService _llm = Get.find<LlmService>();
@@ -136,11 +137,17 @@ class ChatController extends GetxController {
       chat.updatedAt = DateTime.now();
       _storage.saveChat(chat);
       chats.refresh();
+      if (_storage.autoSpeak &&
+          aiMsg.content.isNotEmpty &&
+          !aiMsg.content.startsWith('⚠')) {
+        TtsService.instance.speak(identityHashCode(aiMsg).toString(), aiMsg.content);
+      }
     }
   }
 
   /// Stop current generation.
   void stopGeneration() {
+    TtsService.instance.stop();
     _llm.stopGeneration();
     isGenerating.value = false;
   }
